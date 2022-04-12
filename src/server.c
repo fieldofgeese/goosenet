@@ -1,5 +1,5 @@
-#include "log.h"
-#include "socket.h"
+#include "common/log.h"
+#include "common/socket.h"
 
 // stdlib
 #include <string.h>
