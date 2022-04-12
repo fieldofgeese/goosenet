@@ -86,7 +86,7 @@ int socket_connect(const char *host, const char *port) {
     };
 
     // Get possible addresses for the
-    // given hostname
+    // given hostname.
     struct addrinfo *info = NULL;
     int err = getaddrinfo(host, port, &hints, &info);
     if (err != 0) {
@@ -95,7 +95,7 @@ int socket_connect(const char *host, const char *port) {
     }
 
     // Loop over possible addresses and connect to
-    // the first one which works
+    // the first one which works.
     int sock = -1;
     struct addrinfo *p = NULL;
     for (p = info; p != NULL; p = p->ai_next) {
@@ -109,7 +109,7 @@ int socket_connect(const char *host, const char *port) {
             continue;
         }
 
-        // If we get to there the socket is up and bound
+        // If we get to there the socket is up and bound.
         break;
     }
 
@@ -135,7 +135,7 @@ int socket_bind(const char *port) {
 
     struct addrinfo *info = NULL;
     // Pass `NULL` as ip argument as we want to accept connections,
-    // specifying ip makes no sense, only port needed
+    // specifying ip makes no sense, only port needed.
     int err = getaddrinfo(NULL, port, &hints, &info);
     if (err != 0) {
         log_error(gai_strerror(err));
@@ -143,7 +143,7 @@ int socket_bind(const char *port) {
     }
 
     // Loop over possible addresses and bind to
-    // the first one which works
+    // the first one which works.
     int sock = -1;
     const int yes = 1;
     struct addrinfo *p = NULL;
@@ -169,7 +169,7 @@ int socket_bind(const char *port) {
             continue;
         }
 
-        // If we get to there the socket is up and bound
+        // If we get to there the socket is up and bound.
         break;
     }
 
@@ -198,7 +198,7 @@ int socket_accept(int sock) {
 
     // Might be nice to move this to a separate function,
     // I think it's best to keep track of the ip ourselves,
-    // but we could rely on the OS and use `getpeername(...)`
+    // but we could rely on the OS and use `getpeername(...)`.
     int port = 0;
     char ipstr[INET6_ADDRSTRLEN] = {0};
     switch (their_addr.ss_family) {

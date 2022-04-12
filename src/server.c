@@ -31,6 +31,8 @@ int main(int argc, char **argv) {
     log_info("Bound socket to port %s!", port);
     log_info("Listening...");
 
+    // Use `listen` to mark `accept_socket` as
+    // accepting connections.
     const unsigned backlog = 512;
     if (listen(accept_sock, backlog) == -1) {
         log_error("Failed to listen: %s", strerror(errno));
@@ -58,9 +60,11 @@ int main(int argc, char **argv) {
         // (might not be needed but you never know.)
         socket_set_blocking(sock, true);
 
-        // Respond to connection until it's closed
+        // Respond to connection until it's closed.
         unsigned char buf[256] = {0};
         while (true) {
+            // Assume the client attemps to send us data, so
+            // get it here (blocking).
             log_info("Waiting on data...");
             memset(buf, 0, sizeof(buf));
             if (socket_recv_all(sock, buf, sizeof(buf)-1) == -1) {
@@ -69,6 +73,7 @@ int main(int argc, char **argv) {
             }
             log_info("    Got: %s", buf);
 
+            // Send back the same data they sent us.
             log_info("    Sending response");
             if (socket_send_all(sock, buf, strlen((char *) buf)) == -1) {
                 log_info("Client disconnected");

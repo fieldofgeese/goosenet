@@ -15,13 +15,13 @@
 // immediately if there's no data.
 void socket_set_blocking(int sock, bool state);
 
-// Send all data to the socket
+// Send all data to the socket.
 int socket_send_all(int sock, const unsigned char *data, const size_t size);
 
-// Receieve all data available in the socket (blocking)
+// Receieve all data available in the socket (blocking).
 int socket_recv_all(int sock, unsigned char *buf, const size_t buf_size);
 
-// Create a new TCP socket and attempts to connect to
+// Create a new TCP socket and attempts to connect to.
 // the specified host:port.
 int socket_connect(const char *host, const char *port);
 

@@ -33,18 +33,22 @@ int main(int argc, char **argv) {
     unsigned char buf[256] = {0};
 
     while (true) {
+        // Read input from user.
         printf("| ");
         memset(buf, 0, sizeof(buf));
         if (fgets((char *) buf, sizeof(buf)-1, stdin) == NULL) {
             break;
         }
 
-        // Send strlen(buf)-1 to remove trailing newline
+        // Send data to server, use `strlen(buf)-1` to remove trailing
+        // newline added by `fgets`.
         if (socket_send_all(sock, buf, strlen((char *) buf)-1) == -1) {
             log_error("Server disconnected!");
             break;
         }
 
+        // Assume the server sends back data, so we recieve it here
+        // (blocking).
         memset(buf, 0, sizeof(buf));
         if (socket_recv_all(sock, buf, sizeof(buf)-1) == -1) {
             log_error("Server disconnected!");
