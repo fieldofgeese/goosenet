@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "common/log.h"
 #include "common/socket.h"
 
@@ -5,10 +6,7 @@
 #include <string.h>
 #include <assert.h>
 
-#define ARRLEN(arr) \
-    (sizeof(arr)/sizeof(arr[0]))
-
-#define MAX_CONNS 64
+#define MAX_CONNS 1024
 
 static int disconnect_client(int set, int sock, int *conn_socks, int *num_conns) {
     // Remove from epoll
@@ -26,9 +24,14 @@ static int disconnect_client(int set, int sock, int *conn_socks, int *num_conns)
     for (int i = index+1; i < *num_conns; ++i)
         conn_socks[i-1] = conn_socks[i];
     --(*num_conns);
+
+    // Get address
+    struct address addr = {0};
+    get_address(sock, &addr);
     close(sock);
 
-    log_info("Client disconnected!");
+    log_info("(%s:%d) disconnected!", addr.host, addr.port);
+    log_info("[%u/%u] connections", *num_conns, MAX_CONNS);
 
     return 0;
 }
@@ -59,7 +62,7 @@ int main(int argc, char **argv) {
     // Setup epoll
     int set = epoll_create1(0);
     if (set == -1) {
-        log_error("Failed to create pollset: %s", strerror(errno));
+        log_error("Failed to create epoll fd: %s", strerror(errno));
         return 1;
     }
 
@@ -70,7 +73,7 @@ int main(int argc, char **argv) {
         .data.fd = accept_sock,
     };
     if (epoll_ctl(set, EPOLL_CTL_ADD, accept_sock, &ev) == -1) {
-        log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
+        log_error("Failed to add new connected fd to epoll: %s!", strerror(errno));
         return 1;
     }
 
@@ -92,27 +95,37 @@ int main(int argc, char **argv) {
         for (int i = 0; i < num_events; ++i) {
             if (events[i].data.fd == accept_sock) {
                 // Accept new connection
-                if (num_conns >= MAX_CONNS) {
-                    // TODO(anjo): A better way to handle this would be to accept
-                    // the connection, and quickly answer, letting the client know
-                    // the room is full.
-                    log_warning("Pending connection, but we're out of room!");
-                    continue;
-                }
+                struct address addr = {0};
 
-                int sock = socket_accept(accept_sock);
+                int sock = socket_accept(accept_sock, &addr);
                 if (sock == -1) {
-                    log_error("Failed to accept incoming connection!\n");
+                    log_error("Failed to accept incoming connection!");
                     return 1;
                 }
+
+                if (num_conns >= MAX_CONNS) {
+                    // Immediately close connection.
+                    //
+                    // TODO(anjo): Some improvements, either
+                    //     1. Send rejection packet, so client knows what's up
+                    //     2. Close accept socket once full so no connection attempts can
+                    //        be made.
+                    close(sock);
+                    log_warning("Dropping pending connection (out of room)!");
+                    continue;
+                }
                 conn_socks[num_conns++] = sock;
+
+                log_info("(%s:%d) connected!", addr.host, addr.port);
+                log_info("[%u/%u] connections", num_conns, MAX_CONNS);
+
                 set_blocking(sock, false);
                 struct epoll_event ev = {
                     .events = EPOLLIN | EPOLLET | EPOLLRDHUP,
                     .data.fd = sock,
                 };
                 if (epoll_ctl(set, EPOLL_CTL_ADD, sock, &ev) == -1) {
-                    log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
+                    log_error("Failed to add new connected fd to epoll: %s!", strerror(errno));
                     return 1;
                 }
             } else if (events[i].events & EPOLLRDHUP) {
@@ -128,9 +141,13 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
-                log_info("Received %u bytes\n", bytes_read);
+                // TODO(anjo): Save this info alongside the socket in conn_socks?
+                // Might be nice to not have to fetch it from the kernel every time.
+                struct address addr = {0};
+                get_address(sock, &addr);
+                log_info("(%s:%d) sent %uB", addr.host, addr.port, bytes_read);
 
-                // Send back the same data they sent us.
+                // Forward data to all connected clients
                 for (int i = 0; i < num_conns; ++i) {
                     int sock = conn_socks[i];
                     if (socket_send_all(sock, buf, bytes_read) == -1) {

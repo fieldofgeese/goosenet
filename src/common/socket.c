@@ -1,10 +1,10 @@
+#include "common.h"
 #include "log.h"
 #include "socket.h"
 
 #include <string.h>
 
 #include <sys/types.h>
-#include <netdb.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 
@@ -175,38 +175,40 @@ int socket_bind(const char *port) {
     return sock;
 }
 
-int socket_accept(int sock) {
+int socket_accept(int sock, struct address *addr) {
     struct sockaddr_storage their_addr;
     socklen_t sin_size = sizeof(their_addr);
 
     int connected_sock = accept(sock, (struct sockaddr *) &their_addr, &sin_size);
-    if (connected_sock == -1) {
-        log_error("Failed to accept connection: %s", strerror(errno));
+    if (connected_sock == -1)
         return -1;
-    }
 
-    // Might be nice to move this to a separate function,
-    // I think it's best to keep track of the ip ourselves,
-    // but we could rely on the OS and use `getpeername(...)`.
+    get_address_from_storage(&their_addr, addr);
+
+    return connected_sock;
+}
+
+void get_address_from_storage(struct sockaddr_storage *storage, struct address *addr) {
     int port = 0;
-    char ipstr[INET6_ADDRSTRLEN] = {0};
-    switch (their_addr.ss_family) {
+    switch (storage->ss_family) {
     case AF_INET: {
-        struct sockaddr_in *s = (struct sockaddr_in *) &their_addr;
-        port = ntohs(s->sin_port);
-        inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof(ipstr));
+        struct sockaddr_in *s = (struct sockaddr_in *) storage;
+        addr->port = ntohs(s->sin_port);
+        inet_ntop(AF_INET, &s->sin_addr, addr->host, ARRLEN(addr->host));
     } break;
     case AF_INET6: {
-        struct sockaddr_in6 *s = (struct sockaddr_in6 *) &their_addr;
-        port = ntohs(s->sin6_port);
-        inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof(ipstr));
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *) storage;
+        addr->port = ntohs(s->sin6_port);
+        inet_ntop(AF_INET6, &s->sin6_addr, addr->host, ARRLEN(addr->host));
     } break;
     default:
         log_error("Something went horribly wrong, WHO ARE YOU? ._.");
-        return -1;
     };
+}
 
-    log_info("%s:%d connected!", ipstr, port);
-
-    return connected_sock;
+void get_address(const int sock, struct address *addr) {
+    struct sockaddr_storage storage;
+    socklen_t size = sizeof(storage);
+    getpeername(sock, (struct sockaddr *) &storage, &size);
+    get_address_from_storage(&storage, addr);
 }

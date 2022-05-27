@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "common/log.h"
 #include "common/socket.h"
 #include "common/packet.h"
@@ -14,12 +15,6 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
-
-#define ARRLEN(arr) \
-    (sizeof(arr)/sizeof(arr[0]))
-
-#define MIN(a, b) \
-    ((a < b) ? a : b)
 
 #define      with ";"
 #define     plain "0" /* or "" */
@@ -177,7 +172,7 @@ int main(int argc, char **argv) {
     // Setup epoll
     int set = epoll_create1(0);
     if (set == -1) {
-        log_error("Failed to create pollset: %s", strerror(errno));
+        log_error("Failed to create epoll fd: %s", strerror(errno));
         return 1;
     }
 
