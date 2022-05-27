@@ -21,9 +21,8 @@ static int disconnect_client(int set, int sock, int *conn_socks, int *num_conns)
         if (conn_socks[index] == sock)
             break;
     assert(index < *num_conns);
-    for (int i = index+1; i < *num_conns; ++i)
-        conn_socks[i-1] = conn_socks[i];
-    --(*num_conns);
+
+    conn_socks[index] = conn_socks[--(*num_conns)];
 
     // Get address
     struct address addr = {0};
