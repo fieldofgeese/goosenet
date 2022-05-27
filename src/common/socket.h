@@ -10,10 +10,12 @@
 // Common socket operations
 //
 
-// Should the socket block? i.e. should it
+// Should the fd block? i.e. should it
 // wait until data is available or return
 // immediately if there's no data.
-void socket_set_blocking(int sock, bool state);
+//
+// Works for non-socket fds!
+void set_blocking(int fd, bool state);
 
 // Send all data to the socket.
 int socket_send_all(int sock, const unsigned char *data, const size_t size);

@@ -12,15 +12,15 @@
 // Common socket operations
 //
 
-void socket_set_blocking(int sock, bool state) {
+void set_blocking(int fd, bool state) {
     if (state) {
         // Unset O_NONBLOCK flag
-        int opts = fcntl(sock, F_GETFL);
+        int opts = fcntl(fd, F_GETFL);
         opts &= ~O_NONBLOCK;
-        fcntl(sock, F_SETFL, opts);
+        fcntl(fd, F_SETFL, opts);
     } else {
         // Set O_NONBLOCK flag
-        fcntl(sock, F_SETFL, O_NONBLOCK);
+        fcntl(fd, F_SETFL, O_NONBLOCK);
     }
 }
 
@@ -50,31 +50,16 @@ int socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
     size_t total_bytes_received = 0;
     ssize_t bytes_received = 0;
 
-    socket_set_blocking(sock, true);
-    bytes_received = recv(sock,
-                          buf + total_bytes_received,
-                          buf_size - total_bytes_received, 0);
-    if (bytes_received == -1 ||
-        (total_bytes_received == 0 && bytes_received == 0)) {
-        return -1;
-    }
-    total_bytes_received += bytes_received;
-
-    socket_set_blocking(sock, false);
-
     do {
         bytes_received = recv(sock,
                               buf + total_bytes_received,
                               buf_size - total_bytes_received, 0);
         if ((bytes_received == -1 && errno != EWOULDBLOCK && errno != EAGAIN) ||
             (total_bytes_received == 0 && bytes_received == 0)) {
-            socket_set_blocking(sock, true);
             return -1;
         }
         total_bytes_received += bytes_received;
     } while (bytes_received > 0);
-
-    socket_set_blocking(sock, true);
 
     return 0;
 }
