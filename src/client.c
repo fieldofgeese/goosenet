@@ -1,5 +1,6 @@
 #include "common/log.h"
 #include "common/socket.h"
+#include "common/packet.h"
 
 #include <sys/ioctl.h>
 #include <sys/epoll.h>
@@ -17,8 +18,8 @@
 #define ARRLEN(arr) \
     (sizeof(arr)/sizeof(arr[0]))
 
-// TODO(anjo): doesn't this already exist somewhere?
-#define STDIN 1
+#define MIN(a, b) \
+    ((a < b) ? a : b)
 
 #define      with ";"
 #define     plain "0" /* or "" */
@@ -60,9 +61,18 @@
 #define say(s) write(1,s,sizeof(s))
 #define sz(s) (sizeof(s)/sizeof(*s))
 
+#define INPUT_BUFFER_SIZE  2048
+#define CHAT_BUFFER_SIZE   2048
+#define OUTPUT_BUFFER_SIZE 2048
+#define NUM_CHAT_LINES     1024
+
 struct termios initial;
 uint16_t width, height;
-char buffer[2048] = {0};
+uint8_t buffer[INPUT_BUFFER_SIZE] = {0};
+uint8_t chat_buffer[CHAT_BUFFER_SIZE] = {0};
+uint8_t output_buffer[OUTPUT_BUFFER_SIZE] = {0};
+uint8_t *lines[NUM_CHAT_LINES] = {0};
+uint32_t num_lines = 0;
 
 size_t textsz(const char* str) {
 	//returns size of string without formatting characters
@@ -134,37 +144,30 @@ void initterm(void) {
 }
 
 void repaint(void) {
-    const uint16_t
-        mx = (width / 2) - (40 / 2),
-           my = (height / 2) + 1;
+    say(esca curs low);
+    for (uint16_t i = 0; i < MIN(height-2, num_lines); ++i) {
+        const char *line = (const char *) lines[num_lines-i-1];
+        printf(esca "%u" with "%u" jump, height-2-i, 0);
+        say(esca clear_line);
+        puts(line);
+    }
 
-    //if (help_visible) for (size_t i = 0; i < sz(instructions); ++i)
-    //    printf(esca "%u" with "%u" jump fmt(plain) "%s",
-    //           // place lines above meter
-    //           my - (1 + (sz(instructions) - i)),
-    //           // center each line
-    //           (width/2) - (textsz(instructions[i])/2),
-    //           // print line
-    //           instructions[i]);
-
-    printf(esca "%u" with "%u" jump, my, mx);
+    printf(esca "%u" with "%u" jump, height-1, 0);
     say(esca clear_line);
-
-    //for (size_t i = 0; i < meter_size; ++i)
-    //    printf(esca wfg "%u" color "%s",
-    //           i < meter_value ? meter_color_on : meter_color_off,
-    //           i < meter_value ? "█" : "░");
+    printf("(%lu) %s", strlen((char *) buffer), (char *) buffer);
+    say(esca curs high);
 }
 
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        log_error("Usage: gn-client [hostname] [port]");
+    if (argc != 4) {
+        log_error("Usage: gn-client [nick] [hostname] [port]");
         return 1;
     }
 
-    const char *host = argv[1];
-    const char *port = argv[2];
+    const char *nick = argv[1];
+    const char *host = argv[2];
+    const char *port = argv[3];
 
     int sock = socket_connect(host, port);
     if (sock == -1) {
@@ -178,61 +181,95 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    const bool interactive = isatty(fileno(stdin));
+
     struct epoll_event ev = {
         .events = EPOLLIN | EPOLLET | EPOLLRDHUP,
         .data.fd = sock,
     };
-    if (epoll_ctl(set, EPOLL_CTL_ADD, sock, &ev) == -1) {
-        log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
-        return 1;
+    if (interactive) {
+        if (epoll_ctl(set, EPOLL_CTL_ADD, sock, &ev) == -1) {
+            log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
+            return 1;
+        }
     }
     set_blocking(sock, false);
 
     ev.events = EPOLLIN | EPOLLET;
-    ev.data.fd = STDIN;
-    if (epoll_ctl(set, EPOLL_CTL_ADD, STDIN, &ev) == -1) {
+    ev.data.fd = fileno(stdin);
+    if (epoll_ctl(set, EPOLL_CTL_ADD, fileno(stdin), &ev) == -1) {
         log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
         return 1;
     }
-    set_blocking(STDIN, false);
+    set_blocking(fileno(stdin), false);
 
-    initterm();
-    signal(SIGWINCH, resize);
-    resize(0);
+
+    if (interactive) {
+        initterm();
+        signal(SIGWINCH, resize);
+        resize(0);
+    }
 
     bool should_run = true;
-    char *input = buffer;
-    unsigned char buf[256] = {0};
+    bool should_repaint = true;
+    uint8_t *input = buffer;
+    uint8_t *output = chat_buffer;
 
     struct epoll_event events[64] = {0};
     while (should_run) {
         const int num_events = epoll_wait(set, events, ARRLEN(events), -1);
-        if (num_events == -1) {
+        if (num_events == -1 && errno != EINTR) {
             log_error("epoll_wait() failed: %s", strerror(errno));
             return 1;
         }
 
         for (int i = 0; i < num_events; ++i) {
-            if (events[i].data.fd == STDIN) {
+            if (events[i].data.fd == fileno(stdin)) {
                 // TODO(anjo): Move to EPOLLIN?
                 char inkey = '\0';
-                while (inkey != '\x1b') {
-                    if (read(STDIN, &inkey, 1) == -1)
+                while (should_run) {
+                    int r = read(fileno(stdin), &inkey, 1);
+                    if (r == -1)
                         break;
 
+                    if (r == 0) {
+                        should_run = false;
+                        break;
+                    }
+
                     switch (inkey) {
+                    case '\0':
+                    case '\x1b':
+                        should_run = false;
+                        break;
                     case '\r':
                     case '\n': {
-                        // Send data to server, use `strlen(buf)-1` to remove trailing
-                        // newline added by `fgets`.
-                        if (socket_send_all(sock, buffer, strlen(buffer)) == -1) {
-                            log_error("Server disconnected!");
+                        if (input == buffer)
+                            break;
+
+                        struct packet p = {
+                            .name = nick,
+                            .data = buffer,
+                            .data_size = strlen((char *) buffer) + 1,
+                        };
+
+                        if (packet_size(&p) > ARRLEN(output_buffer)) {
+                            log_error("Dropping packet, size larger than output buffer, and we don't support partial packets!");
+                            input = buffer;
+                            *input = '\0';
                             break;
                         }
 
-
+                        packet_encode(&p, output_buffer);
                         input = buffer;
                         *input = '\0';
+
+                        //sleep(1);
+                        if (socket_send_all(sock, output_buffer, packet_size(&p)) == -1) {
+                            log_error("Server disconnected (send failed)!");
+                            break;
+                        }
+
                         break;
                     }
                     case 127:
@@ -242,14 +279,14 @@ int main(int argc, char **argv) {
                         break;
                     default:
                         if (input + 1 < buffer + ARRLEN(buffer)) {
+                            //log_info("key: %u", inkey);
                             *input++ = inkey;
                             *input   = '\0';
                         }
                     }
 
                 }
-                repaint();
-                puts(buffer);
+                should_repaint = true;
             } else if (events[i].events & EPOLLRDHUP) {
                 if (epoll_ctl(set, EPOLL_CTL_DEL, events[i].data.fd, NULL) == -1) {
                     log_error("Failed to remove disconnected fd from epoll: %s!\n", strerror(errno));
@@ -257,60 +294,45 @@ int main(int argc, char **argv) {
                 }
                 close(events[i].data.fd);
             } else if (events[i].events & EPOLLIN) {
-                memset(buf, 0, sizeof(buf));
-                if (socket_recv_all(events[i].data.fd, buf, sizeof(buf)-1) == -1) {
-                    log_error("Server disconnected!");
+                size_t bytes_read = socket_recv_all(events[i].data.fd, output_buffer, ARRLEN(output_buffer));
+                if (bytes_read == -1) {
+                    log_error("Server disconnected (recv failed)!");
                     break;
                 }
-                printf("> %s\n", buf);
+
+                struct packet p = {0};
+                size_t read_size = 0;
+                while (read_size < bytes_read &&
+                       packet_decode(output_buffer + read_size, bytes_read, &p) == 0) {
+                    memcpy(output, p.name, strlen(p.name));
+                    memcpy(output + strlen(p.name), "> ", 2);
+                    memcpy(output + strlen(p.name) + 2, p.data, p.data_size);
+                    lines[num_lines++] = output;
+
+                    // TODO(anjo): This is a hack, the data should already include
+                    // a null terminator.
+                    output[strlen(p.name) + 2 + p.data_size-1] = '\0';
+
+                    output += strlen(p.name) + 2 + p.data_size;
+                    read_size += packet_size(&p);
+                    should_repaint = true;
+                }
             } else {
                 log_error("Unhandled epoll event!");
             }
         }
+
+        if (interactive && should_repaint) {
+            repaint();
+            should_repaint = false;
+        }
     }
 
-    //char inkey = '\0';
-    //while (inkey != '\x1b') {
-    //    read(1, &inkey, 1);
-
-    //    switch (inkey) {
-    //    case '\r':
-    //    case '\n': {
-    //        // Send data to server, use `strlen(buf)-1` to remove trailing
-    //        // newline added by `fgets`.
-    //        if (socket_send_all(sock, buffer, strlen(buffer)) == -1) {
-    //            log_error("Server disconnected!");
-    //            break;
-    //        }
-
-    //        // Assume the server sends back data, so we recieve it here
-    //        // (blocking).
-    //        memset(buf, 0, sizeof(buf));
-    //        if (socket_recv_all(sock, buf, sizeof(buf)-1) == -1) {
-    //            log_error("Server disconnected!");
-    //            break;
-    //        }
-    //        printf("> %s\n", buf);
-    //        input = buffer;
-    //        *input = '\0';
-    //        break;
-    //    }
-    //    case 127:
-    //    case '\b':
-    //        if (input > buffer)
-    //            *(--input) = '\0';
-    //        break;
-    //    default:
-    //        if (input + 1 < buffer + ARRLEN(buffer)) {
-    //            *input++ = inkey;
-    //            *input   = '\0';
-    //        }
-    //    }
-
-    //    repaint();
-    //    puts(buffer);
-
-    //}
+    // If we're not interactive, wait a while before exiting so
+    // we don't accidentatly exit before everything is sent!
+    // TODO(anjo): Is there some other way to do this?
+    if (!interactive)
+        usleep(500);
 
     close(sock);
 

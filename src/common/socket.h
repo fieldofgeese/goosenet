@@ -21,7 +21,7 @@ void set_blocking(int fd, bool state);
 int socket_send_all(int sock, const unsigned char *data, const size_t size);
 
 // Receieve all data available in the socket (blocking).
-int socket_recv_all(int sock, unsigned char *buf, const size_t buf_size);
+size_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size);
 
 // Create a new TCP socket and attempts to connect to.
 // the specified host:port.

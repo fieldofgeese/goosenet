@@ -10,6 +10,29 @@
 
 #define MAX_CONNS 64
 
+static int disconnect_client(int set, int sock, int *conn_socks, int *num_conns) {
+    // Remove from epoll
+    if (epoll_ctl(set, EPOLL_CTL_DEL, sock, NULL) == -1) {
+        log_error("Failed to remove disconnected fd from epoll: %s!\n", strerror(errno));
+        return 1;
+    }
+
+    // Remove from client array
+    int index = 0;
+    for (; index < *num_conns; ++index)
+        if (conn_socks[index] == sock)
+            break;
+    assert(index < *num_conns);
+    for (int i = index+1; i < *num_conns; ++i)
+        conn_socks[i-1] = conn_socks[i];
+    --(*num_conns);
+    close(sock);
+
+    log_info("Client disconnected!");
+
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         log_error("Usage: gn-server [port]");
@@ -19,9 +42,8 @@ int main(int argc, char **argv) {
     const char *port = argv[1];
 
     int accept_sock = socket_bind(port);
-    if (accept_sock == -1) {
+    if (accept_sock == -1)
         return 1;
-    }
 
     log_info("Bound socket to port %s!", port);
     log_info("Listening...");
@@ -95,61 +117,24 @@ int main(int argc, char **argv) {
                 }
             } else if (events[i].events & EPOLLRDHUP) {
                 // Client disconnected
-                if (epoll_ctl(set, EPOLL_CTL_DEL, events[i].data.fd, NULL) == -1) {
-                    log_error("Failed to remove disconnected fd from epoll: %s!\n", strerror(errno));
-                    return 1;
-                }
-                int index = 0;
-                for (; index < num_conns; ++index)
-                    if (conn_socks[index] == events[i].data.fd)
-                        break;
-                assert(index < num_conns);
-                for (int i = index+1; i < num_conns; ++i)
-                    conn_socks[i-1] = conn_socks[i];
-                --num_conns;
-                close(events[i].data.fd);
+                disconnect_client(set, events[i].data.fd, conn_socks, &num_conns);
             } else if (events[i].events & EPOLLIN) {
                 // Data on the socket
                 int sock = events[i].data.fd;
-                log_info("Waiting on data...");
                 memset(buf, 0, sizeof(buf));
-                if (socket_recv_all(sock, buf, sizeof(buf)-1) == -1) {
-                    log_info("Client disconnected");
-                    if (epoll_ctl(set, EPOLL_CTL_DEL, events[i].data.fd, NULL) == -1) {
-                        log_error("Failed to remove disconnected fd from epoll: %s!\n", strerror(errno));
-                        return 1;
-                    }
-                    int index = 0;
-                    for (; index < num_conns; ++index)
-                        if (conn_socks[index] == events[i].data.fd)
-                            break;
-                    assert(index < num_conns);
-                    for (int i = index+1; i < num_conns; ++i)
-                        conn_socks[i-1] = conn_socks[i];
-                    --num_conns;
-                    close(events[i].data.fd);
+                size_t bytes_read = socket_recv_all(sock, buf, sizeof(buf));
+                if (bytes_read == -1) {
+                    disconnect_client(set, events[i].data.fd, conn_socks, &num_conns);
                     continue;
                 }
-                log_info("    Got: %s", buf);
+
+                log_info("Received %u bytes\n", bytes_read);
 
                 // Send back the same data they sent us.
-                log_info("    Sending response");
                 for (int i = 0; i < num_conns; ++i) {
                     int sock = conn_socks[i];
-                    if (socket_send_all(sock, buf, strlen((char *) buf)) == -1) {
-                        log_info("Client disconnected");
-                        if (epoll_ctl(set, EPOLL_CTL_DEL, sock, NULL) == -1) {
-                            log_error("Failed to remove disconnected fd from epoll: %s!\n", strerror(errno));
-                            return 1;
-                        }
-                        int index = 0;
-                        for (; index < num_conns; ++index)
-                            if (conn_socks[index] == sock)
-                                break;
-                        assert(index < num_conns);
-                        for (int i = index+1; i < num_conns; ++i)
-                            conn_socks[i-1] = conn_socks[i];
-                        --num_conns;
+                    if (socket_send_all(sock, buf, bytes_read) == -1) {
+                        disconnect_client(set, sock, conn_socks, &num_conns);
                         close(sock);
                     }
                 }
@@ -158,51 +143,6 @@ int main(int argc, char **argv) {
             }
         }
     }
-
-    // Here's a simple loop that serves one client at a time,
-    // we do the following:
-    //   1. Call `socket_accept` in a loop (blocks), will return when
-    //      we have a new connection.
-    //
-    //   2. In a new loop, keep reading and writing data to the
-    //      client, until the connection is closed.
-    //
-    //   3. Close client socket and goto 1 to wait for new connection.
-    //while (true) {
-    //    log_info("Accepting connection...");
-    //    int sock = socket_accept(accept_sock);
-    //    if (sock == -1) {
-    //        return 1;
-    //    }
-
-    //    // The new connection can now be reached on
-    //    // `sock`. Make sure we set it to blocking,
-    //    // (might not be needed but you never know.)
-    //    socket_set_blocking(sock, true);
-
-    //    // Respond to connection until it's closed.
-    //    unsigned char buf[256] = {0};
-    //    while (true) {
-    //        // Assume the client attemps to send us data, so
-    //        // get it here (blocking).
-    //        log_info("Waiting on data...");
-    //        memset(buf, 0, sizeof(buf));
-    //        if (socket_recv_all(sock, buf, sizeof(buf)-1) == -1) {
-    //            log_info("Client disconnected");
-    //            break;
-    //        }
-    //        log_info("    Got: %s", buf);
-
-    //        // Send back the same data they sent us.
-    //        log_info("    Sending response");
-    //        if (socket_send_all(sock, buf, strlen((char *) buf)) == -1) {
-    //            log_info("Client disconnected");
-    //            break;
-    //        }
-    //    }
-
-    //    close(sock);
-    //}
 
     close(accept_sock);
 

@@ -42,11 +42,7 @@ int socket_send_all(int sock, const unsigned char *data, const size_t size) {
 // Same here, the `recv(...)` function is not guaranteed to read all the data
 // available in the socket, so call it repeatedaly until it returns that
 // the socket is emtpy.
-//
-// This functions shit atm., it's really supposed to work with non-blocking
-// sockets, but we don't have epoll yet so I force it to perform one blocking
-// recv and then call it non-blocking to get the rest. Really messy! :o
-int socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
+size_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
     size_t total_bytes_received = 0;
     ssize_t bytes_received = 0;
 
@@ -54,14 +50,22 @@ int socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
         bytes_received = recv(sock,
                               buf + total_bytes_received,
                               buf_size - total_bytes_received, 0);
-        if ((bytes_received == -1 && errno != EWOULDBLOCK && errno != EAGAIN) ||
-            (total_bytes_received == 0 && bytes_received == 0)) {
+
+        // TODO(anjo): Is this even used??
+        if (total_bytes_received == 0 && bytes_received == 0)
             return -1;
+
+        if (bytes_received == -1) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN)
+                break;
+            else
+                return -1;
         }
+
         total_bytes_received += bytes_received;
     } while (bytes_received > 0);
 
-    return 0;
+    return total_bytes_received;
 }
 
 int socket_connect(const char *host, const char *port) {
