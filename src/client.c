@@ -305,10 +305,6 @@ int main(int argc, char **argv) {
                     memcpy(output + strlen(p.name) + 2, p.data, p.data_size);
                     lines[num_lines++] = output;
 
-                    // TODO(anjo): This is a hack, the data should already include
-                    // a null terminator.
-                    output[strlen(p.name) + 2 + p.data_size-1] = '\0';
-
                     output += strlen(p.name) + 2 + p.data_size;
                     read_size += packet_size(&p);
                     should_repaint = true;
@@ -326,7 +322,11 @@ int main(int argc, char **argv) {
 
     // If we're not interactive, wait a while before exiting so
     // we don't accidentatly exit before everything is sent!
-    // TODO(anjo): Is there some other way to do this?
+    //
+    // TODO(anjo): Instead of doing this, we can
+    //     1. turn of blocking,
+    //     2. send some EOL packet?!
+    //
     if (!interactive)
         usleep(500);
 
