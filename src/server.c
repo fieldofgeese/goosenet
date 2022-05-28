@@ -36,7 +36,7 @@ static int disconnect_client(int set, int sock, int *conn_socks, int *num_conns)
 }
 
 int main(int argc, char **argv) {
-    
+
     daemon(1, 1);
 
     if (argc != 2) {
@@ -80,7 +80,6 @@ int main(int argc, char **argv) {
     }
 
     unsigned char buf[2048] = {0};
-    unsigned char *input = buf;
 
     int num_conns = 0;
     int conn_socks[MAX_CONNS] = {0};
@@ -137,7 +136,7 @@ int main(int argc, char **argv) {
                 // Data on the socket
                 int sock = events[i].data.fd;
                 memset(buf, 0, sizeof(buf));
-                size_t bytes_read = socket_recv_all(sock, buf, sizeof(buf));
+                ssize_t bytes_read = socket_recv_all(sock, buf, sizeof(buf));
                 if (bytes_read == -1) {
                     disconnect_client(set, events[i].data.fd, conn_socks, &num_conns);
                     continue;

@@ -42,7 +42,7 @@ int socket_send_all(int sock, const unsigned char *data, const size_t size) {
 // Same here, the `recv(...)` function is not guaranteed to read all the data
 // available in the socket, so call it repeatedaly until it returns that
 // the socket is emtpy.
-size_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
+ssize_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
     size_t total_bytes_received = 0;
     ssize_t bytes_received = 0;
 
@@ -189,7 +189,6 @@ int socket_accept(int sock, struct address *addr) {
 }
 
 void get_address_from_storage(struct sockaddr_storage *storage, struct address *addr) {
-    int port = 0;
     switch (storage->ss_family) {
     case AF_INET: {
         struct sockaddr_in *s = (struct sockaddr_in *) storage;

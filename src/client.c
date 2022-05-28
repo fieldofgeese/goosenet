@@ -100,6 +100,7 @@ void restore(void) {
 }
 
 void restore_die(int i) {
+    (void) i;
     // since atexit has already registered a handler,
     // a call to exit(3) is all we actually need
     exit(1);
@@ -108,6 +109,7 @@ void restore_die(int i) {
 void repaint(void);
 
 void resize(int i) {
+    (void) i;
     struct winsize ws;
     ioctl(1, TIOCGWINSZ, &ws);
     width = ws.ws_col;
@@ -121,13 +123,11 @@ void initterm(void) {
     // with non-canonical mode, we need to turn off buffering.
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    termios: {
-        struct termios t;
-        tcgetattr(1, &t);
-        initial = t;
-        t.c_lflag &= (~ECHO & ~ICANON);
-        tcsetattr(1, TCSANOW, &t);
-    };
+    struct termios t;
+    tcgetattr(1, &t);
+    initial = t;
+    t.c_lflag &= (~ECHO & ~ICANON);
+    tcsetattr(1, TCSANOW, &t);
 
     atexit(restore);
     signal(SIGTERM, restore_die);
@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
         .events = EPOLLIN | EPOLLET | EPOLLRDHUP,
         .data.fd = sock,
     };
-    
+
     if (epoll_ctl(set, EPOLL_CTL_ADD, sock, &ev) == -1) {
         log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
         return 1;
@@ -290,14 +290,14 @@ int main(int argc, char **argv) {
                 }
                 close(events[i].data.fd);
             } else if (events[i].events & EPOLLIN) {
-                size_t bytes_read = socket_recv_all(events[i].data.fd, output_buffer, ARRLEN(output_buffer));
+                ssize_t bytes_read = socket_recv_all(events[i].data.fd, output_buffer, ARRLEN(output_buffer));
                 if (bytes_read == -1) {
                     log_error("Server disconnected (recv failed)!");
                     break;
                 }
 
                 struct packet p = {0};
-                size_t read_size = 0;
+                ssize_t read_size = 0;
                 while (read_size < bytes_read &&
                        packet_decode(output_buffer + read_size, bytes_read, &p) == 0) {
                     memcpy(output, p.name, strlen(p.name));
