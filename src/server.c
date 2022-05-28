@@ -36,6 +36,9 @@ static int disconnect_client(int set, int sock, int *conn_socks, int *num_conns)
 }
 
 int main(int argc, char **argv) {
+    
+    daemon(1, 1);
+
     if (argc != 2) {
         log_error("Usage: gn-server [port]");
         return 1;
