@@ -69,6 +69,21 @@ uint8_t output_buffer[OUTPUT_BUFFER_SIZE] = {0};
 uint8_t *lines[NUM_CHAT_LINES] = {0};
 uint32_t num_lines = 0;
 
+enum keys {
+    /* These keycodes are mapped to terminal codes */
+    KEY_NULL      = 0,
+    KEY_ENTER     = 13,
+    KEY_ESC       = 27,
+    KEY_BACKSPACE = 127,
+
+    /* These are derived from escape codes */
+    KEY_INVALID = 1024,
+    KEY_ARROW_LEFT,
+    KEY_ARROW_RIGHT,
+    KEY_ARROW_UP,
+    KEY_ARROW_DOWN,
+};
+
 size_t textsz(const char* str) {
 	//returns size of string without formatting characters
 	size_t sz = 0, i = 0;
@@ -138,6 +153,44 @@ void initterm(void) {
         esca curs low);
 }
 
+static uint32_t read_key(int fd) {
+    char c;
+    int err = read(fd, &c, 1);
+    if (err == -1)
+        return KEY_INVALID;
+    else if (err == 0)
+        return KEY_NULL;
+
+    if (c == KEY_ESC) {
+        char seq[3] = {0};
+        err = read(fd, seq, 2);
+        if (err == -1 || err == 0)
+            return KEY_ESC;
+
+        if (seq[0] == '[') {
+            switch (seq[1]) {
+            case 'A': return KEY_ARROW_UP;
+            case 'B': return KEY_ARROW_DOWN;
+            case 'C': return KEY_ARROW_RIGHT;
+            case 'D': return KEY_ARROW_LEFT;
+            }
+        }
+
+        // Deal with escape characters we don't care about by
+        // just consuming the last character.
+        //
+        // returning KEY_INVALID, will make sure we keep reading
+        // the input instead of bailing (in the outer loop that
+        // calls this).
+        err = read(fd, &seq[2], 1);
+        if (err == -1 || err == 0)
+            return KEY_ESC;
+        return KEY_INVALID;
+    }
+
+    return c;
+}
+
 void repaint(void) {
     say(esca curs low);
     for (uint16_t i = 0; i < MIN(height-2, num_lines); ++i) {
@@ -198,11 +251,10 @@ int main(int argc, char **argv) {
     }
     set_blocking(fileno(stdin), false);
 
-    bool should_repaint;
+    bool should_repaint = false;
     bool should_run = true;
     uint8_t *input = buffer;
     uint8_t *output = chat_buffer;
-
 
     if (interactive) {
         initterm();
@@ -211,7 +263,7 @@ int main(int argc, char **argv) {
         should_repaint = true;
     }
 
-        struct epoll_event events[64] = {0};
+    struct epoll_event events[64] = {0};
     while (should_run) {
         const int num_events = epoll_wait(set, events, ARRLEN(events), -1);
         if (num_events == -1 && errno != EINTR) {
@@ -221,25 +273,28 @@ int main(int argc, char **argv) {
 
         for (int i = 0; i < num_events; ++i) {
             if (events[i].data.fd == fileno(stdin)) {
-                // TODO(anjo): Move to EPOLLIN?
-                char inkey = '\0';
                 while (should_run) {
-                    int r = read(fileno(stdin), &inkey, 1);
-                    if (r == -1)
+                    uint32_t key = read_key(fileno(stdin));
+                    if (key == KEY_INVALID)
                         break;
 
-                    if (r == 0) {
+                    switch (key) {
+                    case KEY_NULL:
+                    case KEY_ESC:
                         should_run = false;
                         break;
-                    }
-
-                    switch (inkey) {
-                    case '\0':
-                    case '\x1b':
-                        should_run = false;
+                    case KEY_ARROW_LEFT:
+                    case KEY_ARROW_RIGHT:
+                    case KEY_ARROW_UP:
+                    case KEY_ARROW_DOWN:
+                        if (input + 1 < buffer + ARRLEN(buffer)) {
+                            *input++ = (char) '^';
+                            *input   = '\0';
+                        }
                         break;
-                    case '\r':
-                    case '\n': {
+                    // TODO(anjo): How to handle \n?
+                    case '\n':
+                    case KEY_ENTER: {
                         if (input == buffer)
                             break;
 
@@ -260,7 +315,6 @@ int main(int argc, char **argv) {
                         input = buffer;
                         *input = '\0';
 
-                        //sleep(1);
                         if (socket_send_all(sock, output_buffer, packet_size(&p)) == -1) {
                             log_error("Server disconnected (send failed)!");
                             break;
@@ -268,19 +322,16 @@ int main(int argc, char **argv) {
 
                         break;
                     }
-                    case 127:
-                    case '\b':
+                    case KEY_BACKSPACE:
                         if (input > buffer)
                             *(--input) = '\0';
                         break;
                     default:
                         if (input + 1 < buffer + ARRLEN(buffer)) {
-                            //log_info("key: %u", inkey);
-                            *input++ = inkey;
+                            *input++ = (char) key;
                             *input   = '\0';
                         }
                     }
-
                 }
                 should_repaint = true;
             } else if (events[i].events & EPOLLRDHUP) {
