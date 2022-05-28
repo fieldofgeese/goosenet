@@ -182,12 +182,12 @@ int main(int argc, char **argv) {
         .events = EPOLLIN | EPOLLET | EPOLLRDHUP,
         .data.fd = sock,
     };
-    if (interactive) {
-        if (epoll_ctl(set, EPOLL_CTL_ADD, sock, &ev) == -1) {
-            log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
-            return 1;
-        }
+    
+    if (epoll_ctl(set, EPOLL_CTL_ADD, sock, &ev) == -1) {
+        log_error("Failed to add new connected fd to epoll: %s!\n", strerror(errno));
+        return 1;
     }
+
     set_blocking(sock, false);
 
     ev.events = EPOLLIN | EPOLLET;
@@ -198,19 +198,20 @@ int main(int argc, char **argv) {
     }
     set_blocking(fileno(stdin), false);
 
+    bool should_repaint;
+    bool should_run = true;
+    uint8_t *input = buffer;
+    uint8_t *output = chat_buffer;
+
 
     if (interactive) {
         initterm();
         signal(SIGWINCH, resize);
         resize(0);
+        should_repaint = true;
     }
 
-    bool should_run = true;
-    bool should_repaint = true;
-    uint8_t *input = buffer;
-    uint8_t *output = chat_buffer;
-
-    struct epoll_event events[64] = {0};
+        struct epoll_event events[64] = {0};
     while (should_run) {
         const int num_events = epoll_wait(set, events, ARRLEN(events), -1);
         if (num_events == -1 && errno != EINTR) {
