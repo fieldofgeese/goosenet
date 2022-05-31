@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <assert.h>
 
 #define      with ";"
 #define     plain "0" /* or "" */
@@ -63,6 +64,8 @@
 
 struct termios initial;
 uint16_t width, height;
+uint16_t input_offset = 0;
+uint16_t chat_offset = 0;
 uint8_t buffer[INPUT_BUFFER_SIZE] = {0};
 uint8_t chat_buffer[CHAT_BUFFER_SIZE] = {0};
 uint8_t output_buffer[OUTPUT_BUFFER_SIZE] = {0};
@@ -193,19 +196,52 @@ static uint32_t read_key(int fd) {
 
 void repaint(void) {
     say(esca curs low);
-    for (uint16_t i = 0; i < MIN(height-2, num_lines); ++i) {
-        const char *line = (const char *) lines[num_lines-i-1];
-        printf(esca "%u" with "%u" jump, height-2-i, 0);
+
+    // Paint chat buffer
+    const uint16_t max_row = height-2;
+    for (uint16_t i = 0; i < max_row; ++i) {
+        printf(esca "%u" with "%u" jump, max_row-i, 0);
         say(esca clear_line);
-        puts(line);
+        if (num_lines > 0 && i < num_lines) {
+            uint16_t line_index = (num_lines-1) - i;
+            if (num_lines > max_row)
+                line_index -= chat_offset;
+            const char *line = (const char *) lines[line_index];
+            write(fileno(stdout), line, strlen(line));
+        }
     }
 
+    // Paint line separating chat from input
     printf(esca "%u" with "%u" jump, height-1, 0);
+    say(fmt(dim));
+    for (uint16_t i = 0; i < width; ++i)
+        printf("%s", "─");
+    say(fmt(plain));
+
+    // Paint input
+    printf(esca "%u" with "%u" jump, height, 0);
     say(esca clear_line);
-    printf("(%lu) %s", strlen((char *) buffer), (char *) buffer);
+    write(fileno(stdout), buffer, strlen((char *) buffer));
+
+    // Paint cursor
+    printf(esca "%u" with "%u" jump, height, input_offset+1);
     say(esca curs high);
 }
 
+static inline void insert(char *buffer, uint16_t offset, char c) {
+    const size_t len = strlen(buffer);
+    assert(offset <= len);
+    for (size_t i = len+1; i > offset; --i)
+        buffer[i] = buffer[i-1];
+    buffer[offset] = c;
+}
+
+static inline void delete(char *buffer, uint16_t offset) {
+    const size_t len = strlen(buffer);
+    assert(offset <= len);
+    for (size_t i = (size_t) offset-1; i < len; ++i)
+        buffer[i] = buffer[i+1];
+}
 
 int main(int argc, char **argv) {
     if (argc != 4) {
@@ -253,7 +289,6 @@ int main(int argc, char **argv) {
 
     bool should_repaint = false;
     bool should_run = true;
-    uint8_t *input = buffer;
     uint8_t *output = chat_buffer;
 
     if (interactive) {
@@ -284,18 +319,28 @@ int main(int argc, char **argv) {
                         should_run = false;
                         break;
                     case KEY_ARROW_LEFT:
+                        if (input_offset > 0)
+                            input_offset--;
+                        break;
                     case KEY_ARROW_RIGHT:
+                        if ((size_t) input_offset < strlen((char *) buffer))
+                            input_offset++;
+                        break;
                     case KEY_ARROW_UP:
+                        // Only increase chat offset if the number of lines in the chat
+                        // buffer exceed the height of the chatbox AND the offset is
+                        // smaller than the maxiumum possible offset.
+                        if (num_lines > height-2 && chat_offset < num_lines - (height-2))
+                            chat_offset++;
+                        break;
                     case KEY_ARROW_DOWN:
-                        if (input + 1 < buffer + ARRLEN(buffer)) {
-                            *input++ = (char) '^';
-                            *input   = '\0';
-                        }
+                        if (chat_offset > 0)
+                            chat_offset--;
                         break;
                     // TODO(anjo): How to handle \n?
                     case '\n':
                     case KEY_ENTER: {
-                        if (input == buffer)
+                        if (buffer[0] == '\0')
                             break;
 
                         struct packet p = {
@@ -306,14 +351,14 @@ int main(int argc, char **argv) {
 
                         if (packet_size(&p) > ARRLEN(output_buffer)) {
                             log_error("Dropping packet, size larger than output buffer, and we don't support partial packets!");
-                            input = buffer;
-                            *input = '\0';
+                            buffer[0] = '\0';
+                            input_offset = 0;
                             break;
                         }
 
                         packet_encode(&p, output_buffer);
-                        input = buffer;
-                        *input = '\0';
+                        buffer[0] = '\0';
+                        input_offset = 0;
 
                         if (socket_send_all(sock, output_buffer, packet_size(&p)) == -1) {
                             log_error("Server disconnected (send failed)!");
@@ -323,13 +368,12 @@ int main(int argc, char **argv) {
                         break;
                     }
                     case KEY_BACKSPACE:
-                        if (input > buffer)
-                            *(--input) = '\0';
+                        if (input_offset > 0)
+                            delete((char *) buffer, input_offset--);
                         break;
                     default:
-                        if (input + 1 < buffer + ARRLEN(buffer)) {
-                            *input++ = (char) key;
-                            *input   = '\0';
+                        if ((size_t) input_offset + 1 < ARRLEN(buffer)) {
+                            insert((char *) buffer, input_offset++, (char) key);
                         }
                     }
                 }
@@ -351,12 +395,28 @@ int main(int argc, char **argv) {
                 ssize_t read_size = 0;
                 while (read_size < bytes_read &&
                        packet_decode(output_buffer + read_size, bytes_read, &p) == 0) {
-                    memcpy(output, p.name, strlen(p.name));
-                    memcpy(output + strlen(p.name), "> ", 2);
-                    memcpy(output + strlen(p.name) + 2, p.data, p.data_size);
+                    const char *begin_fmt = fmt(bright with fg red);
+                    const char *end_fmt = fmt(plain);
+                    size_t offset = 0;
+
+                    memcpy(output+offset, begin_fmt, strlen(begin_fmt));
+                    offset += strlen(begin_fmt);
+
+                    memcpy(output+offset, p.name, strlen(p.name));
+                    offset += strlen(p.name);
+
+                    memcpy(output+offset, "> ", 2);
+                    offset += 2;
+
+                    memcpy(output+offset, end_fmt, strlen(end_fmt));
+                    offset += strlen(end_fmt);
+
+                    memcpy(output+offset, p.data, p.data_size);
+                    offset += p.data_size;
+
                     lines[num_lines++] = output;
 
-                    output += strlen(p.name) + 2 + p.data_size;
+                    output += offset;
                     read_size += packet_size(&p);
                     should_repaint = true;
                 }
