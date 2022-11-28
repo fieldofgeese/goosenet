@@ -17,6 +17,10 @@
 #include <string.h>
 #include <assert.h>
 
+#include "miniaudio.h"
+
+#include <threads.h>
+
 #define      with ";"
 #define     plain "0" /* or "" */
 #define        no "2"
@@ -243,6 +247,58 @@ static inline void delete(char *buffer, uint16_t offset) {
         buffer[i] = buffer[i+1];
 }
 
+static mtx_t voice_mutex;
+static uint32_t voice_buffer_offset;
+static uint8_t voice_buffer[8*192000] = {0};
+
+static int voice_sock;
+
+void data_callback(ma_device *device, void *output, const void *input, ma_uint32 frame_count) {
+    size_t size = ma_get_bytes_per_sample(device->playback.format) * device->playback.channels * frame_count;
+    if (socket_send_all(voice_sock, input, size) == -1) {
+        log_error("voice send() failed: %s", strerror(errno));
+        return;
+    }
+
+    mtx_lock(&voice_mutex);
+    if (voice_buffer_offset >= size) {
+        memcpy(output, voice_buffer, size);
+        memmove(voice_buffer, voice_buffer+size, voice_buffer_offset-size);
+        voice_buffer_offset -= size;
+    }
+    mtx_unlock(&voice_mutex);
+}
+
+int read_int_from_stdin(int *output) {
+    char buf[16] = {0};
+    if (fgets(buf, 16, stdin) == NULL)
+        return 1;
+    *output = atoi(buf);
+    return 0;
+}
+
+void *handle_voice(void *args) {
+    (void) args;
+
+    static uint8_t buf[4800];
+    while (true) {
+        memset(buf, 0, sizeof(buf));
+        ssize_t bytes_read = recv(voice_sock, buf, ARRLEN(buf), 0);
+        if (bytes_read == -1) {
+            log_error("Server disconnected (recv failed)!");
+            continue;
+        }
+        log_info("read %d bytes", bytes_read);
+
+        if (voice_buffer_offset + bytes_read <= ARRLEN(voice_buffer)) {
+            mtx_lock(&voice_mutex);
+            memcpy(voice_buffer + voice_buffer_offset, buf, bytes_read);
+            voice_buffer_offset += bytes_read;
+            mtx_unlock(&voice_mutex);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) {
         log_error("Usage: gn-client [nick] [hostname] [port]");
@@ -253,7 +309,94 @@ int main(int argc, char **argv) {
     const char *host = argv[2];
     const char *port = argv[3];
 
-    int sock = socket_connect(host, port);
+    // Create UDP socket for voice
+    voice_sock = socket_connect(SOCK_DGRAM, host, "9054");
+    if (voice_sock == -1) {
+        return 1;
+    }
+
+    if (mtx_init(&voice_mutex, mtx_plain) == thrd_error) {
+        log_info("Failed to create voice mutex");
+        return 1;
+    }
+
+    thrd_t voice_thread;
+    if (thrd_create(&voice_thread, (thrd_start_t) handle_voice, (void *) port) == thrd_error) {
+        log_info("Failed to create voice thread");
+        return 1;
+    }
+
+    // Initialize miniaudio
+    ma_context context;
+    if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) {
+        fputs("miniaudio: Failed to initialize context", stderr);
+        goto return_normal;
+    }
+
+    // Get list of playback and capture devices
+    ma_device_info* playback_infos = NULL;
+    ma_uint32       playback_count = 0;
+    ma_device_info* capture_infos = NULL;
+    ma_uint32       capture_count = 0;
+    if (ma_context_get_devices(&context, &playback_infos, &playback_count, &capture_infos, &capture_count) != MA_SUCCESS) {
+        fputs("miniaudio: Failed to get devices", stderr);
+        goto context_cleanup;
+    }
+
+    // Select input device
+    puts("Input devices:");
+    for (ma_uint32 i = 0; i < capture_count; ++i) {
+        printf("  %d - %s\n", i, capture_infos[i].name);
+    }
+    printf("Select input device: ");
+
+    int input_choice = 0;
+    if (read_int_from_stdin(&input_choice) != 0 || (input_choice < 0 || (ma_uint32) input_choice >= capture_count)) {
+        fputs("Give me some reasonable input please (^o.o^)", stderr);
+        goto context_cleanup;
+    }
+
+    puts("");
+
+    // Select output device
+    puts("Output devices:");
+    for (ma_uint32 i = 0; i < playback_count; ++i) {
+        printf("  %d - %s\n", i, playback_infos[i].name);
+    }
+    printf("Select output device: ");
+
+    int output_choice = 0;
+    if (read_int_from_stdin(&output_choice) != 0 || (output_choice < 0 || (ma_uint32) output_choice >= playback_count)) {
+        fputs("Give me some reasonable output please (^o.o^)", stderr);
+        goto context_cleanup;
+    }
+
+    // Initialize devices
+    ma_device_config config   = ma_device_config_init(ma_device_type_duplex);
+    config.playback.pDeviceID = &playback_infos[output_choice].id;
+    config.playback.format    = ma_format_f32;
+    config.playback.channels  = 2;
+    config.capture.pDeviceID  = &capture_infos[input_choice].id;
+    config.capture.format     = ma_format_f32;
+    config.capture.channels   = 2;
+    config.sampleRate         = 48000;
+    config.dataCallback       = data_callback;
+    config.pUserData          = NULL;
+
+    ma_device device;
+    if (ma_device_init(&context, &config, &device) != MA_SUCCESS) {
+        fputs("miniaudio: Failed to init device", stderr);
+        goto device_cleanup;
+    }
+    device.masterVolumeFactor = 0.5;
+    log_info("mastr volume %f", device.masterVolumeFactor);
+
+    // Actually play the input/output
+    ma_device_start(&device);
+    fgetc(stdin);
+
+    // Create TCP socket for chatting
+    int sock = socket_connect(SOCK_STREAM, host, port);
     if (sock == -1) {
         return 1;
     }
@@ -441,7 +584,18 @@ int main(int argc, char **argv) {
     if (!interactive)
         usleep(500);
 
+    thrd_join(voice_thread, NULL);
+    mtx_destroy(&voice_mutex);
+
     close(sock);
+
+    ma_device_stop(&device);
+
+device_cleanup:
+    ma_device_uninit(&device);
+context_cleanup:
+    ma_context_uninit(&context);
+return_normal:
 
     return 0;
 }

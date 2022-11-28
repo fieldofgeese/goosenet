@@ -39,6 +39,21 @@ int socket_send_all(int sock, const unsigned char *data, const size_t size) {
     return 0;
 }
 
+// The `sendto(...)` function is not guaranteed to actually send all the
+// data you tell it to send. So just call send until everything is sent.
+int socket_sendto_all(int sock, struct sockaddr_storage *addr, const unsigned char *data, const size_t size) {
+    size_t total_bytes_sent = 0;
+    while (total_bytes_sent < size) {
+        ssize_t bytes_sent = sendto(sock, data + total_bytes_sent, size - total_bytes_sent, 0, (struct sockaddr *) addr, sizeof(*addr));
+        if (bytes_sent == -1) {
+            return -1;
+        }
+        total_bytes_sent += bytes_sent;
+    }
+
+    return 0;
+}
+
 // Same here, the `recv(...)` function is not guaranteed to read all the data
 // available in the socket, so call it repeatedaly until it returns that
 // the socket is emtpy.
@@ -68,10 +83,10 @@ ssize_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
     return total_bytes_received;
 }
 
-int socket_connect(const char *host, const char *port) {
+int socket_connect(int type, const char *host, const char *port) {
     struct addrinfo hints = {
         .ai_family   = AF_UNSPEC,   // IPv4 or IPv6, choose whichever
-        .ai_socktype = SOCK_STREAM, // TCP
+        .ai_socktype = type,
     };
 
     // Get possible addresses for the
@@ -115,12 +130,13 @@ int socket_connect(const char *host, const char *port) {
     return sock;
 }
 
-int socket_bind(const char *port) {
+int socket_bind(int type, const char *port) {
     struct addrinfo hints = {
         .ai_family   = AF_UNSPEC,   // IPv4 or IPv6, choose whichever
-        .ai_socktype = SOCK_STREAM, // TCP
-        .ai_flags    = AI_PASSIVE,  // We want to accept connections
+        .ai_socktype = type,
     };
+    if (type == SOCK_STREAM)
+        hints.ai_flags = AI_PASSIVE;  // We want to accept connections
 
     struct addrinfo *info = NULL;
     // Pass `NULL` as ip argument as we want to accept connections,
