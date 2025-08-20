@@ -2,6 +2,9 @@
 #include "common/log.h"
 #include "common/socket.h"
 #include "common/packet.h"
+#include "common/net-protocol.h"
+#include "common/stack.h"
+#include "crypto.h"
 
 #include <sys/ioctl.h>
 #include <sys/epoll.h>
@@ -65,12 +68,16 @@
 struct termios initial;
 uint16_t width, height;
 uint16_t input_offset = 0;
-uint16_t chat_offset = 0;
 uint8_t buffer[INPUT_BUFFER_SIZE] = {0};
 uint8_t chat_buffer[CHAT_BUFFER_SIZE] = {0};
-uint8_t output_buffer[OUTPUT_BUFFER_SIZE] = {0};
+
+uint16_t line_offset = 0;
 uint8_t *lines[NUM_CHAT_LINES] = {0};
+uint16_t line_lens[NUM_CHAT_LINES] = {0};
 uint32_t num_lines = 0;
+static FILE *fd;
+
+bool show_log = true;
 
 enum keys {
     /* These keycodes are mapped to terminal codes */
@@ -194,20 +201,50 @@ static uint32_t read_key(int fd) {
     return c;
 }
 
+#include <errno.h>
+
 void repaint(void) {
+    fseek(fd, 0, SEEK_END);
+    long size = ftell(fd);
+    fseek(fd, 0, SEEK_SET);
+    uint8_t *mem = malloc(size+1);
+    size_t read = fread(mem, 1, size, fd);
+    printf("read: %ld\n", read);
+    printf("errno: %s\n", strerror(errno));
+    printf("size: %ld\n", size);
+    mem[size] = 0;
+    printf("mem %s", mem);
+    assert(read == size);
+
+    num_lines = 0;
+    uint8_t *l = mem;
+    for (long i = 0; i < size; ++i) {
+        if (mem[i] == '\n') {
+            lines[num_lines] = l;
+            line_lens[num_lines] = mem+i - l;
+            ++num_lines;
+            l = mem + i+1;
+        }
+    }
+
     say(esca curs low);
 
     // Paint chat buffer
     const uint16_t max_row = height-2;
+    const uint32_t max_line_offset = num_lines - max_row;
+    if (line_offset > max_line_offset) {
+        line_offset = max_line_offset;
+    }
     for (uint16_t i = 0; i < max_row; ++i) {
         printf(esca "%u" with "%u" jump, max_row-i, 0);
         say(esca clear_line);
         if (num_lines > 0 && i < num_lines) {
             uint16_t line_index = (num_lines-1) - i;
-            if (num_lines > max_row)
-                line_index -= chat_offset;
+            if (num_lines > max_row) {
+                line_index -= line_offset;
+            }
             const char *line = (const char *) lines[line_index];
-            write(fileno(stdout), line, strlen(line));
+            write(fileno(stdout), line, line_lens[line_index]);
         }
     }
 
@@ -226,6 +263,8 @@ void repaint(void) {
     // Paint cursor
     printf(esca "%u" with "%u" jump, height, input_offset+1);
     say(esca curs high);
+
+    free(mem);
 }
 
 static inline void insert(char *buffer, uint16_t offset, char c) {
@@ -244,6 +283,19 @@ static inline void delete(char *buffer, uint16_t offset) {
 }
 
 int main(int argc, char **argv) {
+    const size_t pagesize = 4096;
+    struct stack stack = {
+        .size = pagesize,
+    };
+
+    const char *io_path = "io-client";
+    FILE *fd_global = NULL;
+    FILE *fd_log = fopen(stack_fmt(&stack, "%s/log", io_path), "w+");
+
+    assert(fd_log);
+    fd = fd_log;
+    log_init(fd_log, false);
+
     if (argc != 4) {
         log_error("Usage: gn-client [nick] [hostname] [port]");
         return 1;
@@ -252,6 +304,9 @@ int main(int argc, char **argv) {
     const char *nick = argv[1];
     const char *host = argv[2];
     const char *port = argv[3];
+
+    crypto_init("keys-client", "password");
+    crypto_generate_or_load_keypair(&stack, nick, KEYPAIR_USER);
 
     int sock = socket_connect(host, port);
     if (sock == -1) {
@@ -298,8 +353,14 @@ int main(int argc, char **argv) {
         should_repaint = true;
     }
 
+    enum connection_state state = HANDSHAKE_WAIT_SERVER_PUB;
+    uint8_t *server_pub_key_data;
+    size_t server_pub_key_len;
+
     struct epoll_event events[64] = {0};
     while (should_run) {
+        stack_clear(&stack);
+
         const int num_events = epoll_wait(set, events, ARRLEN(events), -1);
         if (num_events == -1 && errno != EINTR) {
             log_error("epoll_wait() failed: %s", strerror(errno));
@@ -330,37 +391,43 @@ int main(int argc, char **argv) {
                         // Only increase chat offset if the number of lines in the chat
                         // buffer exceed the height of the chatbox AND the offset is
                         // smaller than the maxiumum possible offset.
-                        if (num_lines > height-2 && chat_offset < num_lines - (height-2))
-                            chat_offset++;
+                        if (num_lines > height-2 && line_offset < num_lines - (height-2)) {
+                            ++line_offset;
+                        }
                         break;
                     case KEY_ARROW_DOWN:
-                        if (chat_offset > 0)
-                            chat_offset--;
+                        if (line_offset > 0)
+                            --line_offset;
                         break;
                     // TODO(anjo): How to handle \n?
                     case '\n':
                     case KEY_ENTER: {
-                        if (buffer[0] == '\0')
+                        if (buffer[0] == '\0') {
                             break;
+                        }
+
+                        uint8_t *encrypted;
+                        size_t encrypted_len;
+                        crypto_encrypt(&stack, "session", KEYPAIR_SESSION, buffer, strlen((char *) buffer) + 1, &encrypted, &encrypted_len);
 
                         struct packet p = {
                             .name = nick,
-                            .data = buffer,
-                            .data_size = strlen((char *) buffer) + 1,
+                            .data = encrypted,
+                            .data_size = encrypted_len,
                         };
 
-                        if (packet_size(&p) > ARRLEN(output_buffer)) {
+                        if (packet_size(&p) > stack.size - stack.top) {
                             log_error("Dropping packet, size larger than output buffer, and we don't support partial packets!");
                             buffer[0] = '\0';
                             input_offset = 0;
                             break;
                         }
 
-                        packet_encode(&p, output_buffer);
+                        const uint8_t *output = packet_encode(&stack, &p);
                         buffer[0] = '\0';
                         input_offset = 0;
 
-                        if (socket_send_all(sock, output_buffer, packet_size(&p)) == -1) {
+                        if (socket_send_all(sock, output, packet_size(&p)) == -1) {
                             log_error("Server disconnected (send failed)!");
                             break;
                         }
@@ -385,7 +452,8 @@ int main(int argc, char **argv) {
                 }
                 close(events[i].data.fd);
             } else if (events[i].events & EPOLLIN) {
-                ssize_t bytes_read = socket_recv_all(events[i].data.fd, output_buffer, ARRLEN(output_buffer));
+                uint8_t *input;
+                ssize_t bytes_read = socket_recv_all(&stack, events[i].data.fd, &input);
                 if (bytes_read == -1) {
                     log_error("Server disconnected (recv failed)!");
                     break;
@@ -394,31 +462,122 @@ int main(int argc, char **argv) {
                 struct packet p = {0};
                 ssize_t read_size = 0;
                 while (read_size < bytes_read &&
-                       packet_decode(output_buffer + read_size, bytes_read, &p) == 0) {
-                    const char *begin_fmt = fmt(bright with fg red);
-                    const char *end_fmt = fmt(plain);
-                    size_t offset = 0;
-
-                    memcpy(output+offset, begin_fmt, strlen(begin_fmt));
-                    offset += strlen(begin_fmt);
-
-                    memcpy(output+offset, p.name, strlen(p.name));
-                    offset += strlen(p.name);
-
-                    memcpy(output+offset, "> ", 2);
-                    offset += 2;
-
-                    memcpy(output+offset, end_fmt, strlen(end_fmt));
-                    offset += strlen(end_fmt);
-
-                    memcpy(output+offset, p.data, p.data_size);
-                    offset += p.data_size;
-
-                    lines[num_lines++] = output;
-
-                    output += offset;
+                       packet_decode(input + read_size, bytes_read, &p) == 0) {
                     read_size += packet_size(&p);
-                    should_repaint = true;
+                    if (state == CONNECTED) {
+                        const char *begin_fmt = fmt(bright with fg red);
+                        const char *end_fmt = fmt(plain);
+                        size_t offset = 0;
+
+                        uint8_t *decrypted;
+                        size_t decrypted_len;
+                        crypto_decrypt(&stack, p.data, p.data_size, &decrypted, &decrypted_len);
+
+                        memcpy(output+offset, begin_fmt, strlen(begin_fmt));
+                        offset += strlen(begin_fmt);
+
+                        memcpy(output+offset, p.name, strlen(p.name));
+                        offset += strlen(p.name);
+
+                        memcpy(output+offset, "> ", 2);
+                        offset += 2;
+
+                        memcpy(output+offset, end_fmt, strlen(end_fmt));
+                        offset += strlen(end_fmt);
+
+                        memcpy(output+offset, decrypted, decrypted_len);
+                        offset += p.data_size;
+
+                        memcpy(output+offset, "\n", 1);
+                        offset += 1;
+
+                        fwrite(output, 1, offset, fd_global);
+
+                        output += offset;
+                        should_repaint = true;
+                    } else {
+                        switch (state) {
+                            case HANDSHAKE_WAIT_SERVER_PUB: {
+                                log_info("received public key len: %d", p.data_size);
+
+                                crypto_add_key(&stack, p.data, p.data_size, KEY_PUBLIC);
+
+                                size_t pub_len;
+                                const uint8_t *pub_key = crypto_get_key(&stack, nick, KEYPAIR_USER, KEY_PUBLIC, &pub_len);
+
+                                uint8_t *out;
+                                size_t out_len;
+                                crypto_encrypt(&stack, "server", KEYPAIR_SERVER, pub_key, pub_len, &out, &out_len);
+
+                                log_info("  [handshake] sending encrypted public key: %lu", out_len);
+
+                                struct packet p = {
+                                    .name = nick,
+                                    .data = out,
+                                    .data_size = out_len
+                                };
+                                const uint8_t *output = packet_encode(&stack, &p);
+                                if (socket_send_all(sock, output, packet_size(&p)) == -1) {
+                                    log_error("Failed to send public key (send failed)!");
+                                    break;
+                                }
+
+                                state = HANDSHAKE_CHALLENGE;
+                                break;
+                            }
+                            case HANDSHAKE_CHALLENGE: {
+                                log_info("received challenge key len: %d", p.data_size);
+
+                                uint8_t *challenge;
+                                size_t challenge_len;
+                                crypto_decrypt(&stack, p.data, p.data_size, &challenge, &challenge_len);
+
+                                log_info("Received challenge: %.*s", (int) challenge_len, challenge);
+
+                                uint8_t *encrypted;
+                                size_t encrypted_len;
+                                crypto_encrypt(&stack, "server", KEYPAIR_SERVER, challenge, challenge_len, &encrypted, &encrypted_len);
+
+                                struct packet p = {
+                                    .name = nick,
+                                    .data = encrypted,
+                                    .data_size = encrypted_len,
+                                };
+                                const uint8_t *output = packet_encode(&stack, &p);
+                                if (socket_send_all(sock, output, packet_size(&p)) == -1) {
+                                    log_error("Failed to send challenge response (send failed)!");
+                                    break;
+                                }
+                                state = HANDSHAKE_WAIT_SESSION_KEYS;
+                                break;
+                            }
+                            case HANDSHAKE_WAIT_SESSION_KEYS: {
+                                log_info("received session keys len: %d", p.data_size);
+
+                                uint8_t *decrypted;
+                                size_t decrypted_len;
+                                crypto_decrypt(&stack, p.data, p.data_size, &decrypted, &decrypted_len);
+
+                                uint32_t session_pub_len = ntohl(pop_value(&decrypted, uint32_t));
+                                uint32_t session_prv_len = ntohl(pop_value(&decrypted, uint32_t));
+                                uint8_t *session_pub = pop_bytes(&decrypted, session_pub_len);
+                                uint8_t *session_prv = pop_bytes(&decrypted, session_prv_len);
+
+                                crypto_add_key(&stack, session_pub, session_pub_len, KEY_PUBLIC);
+                                crypto_add_key(&stack, session_prv, session_prv_len, KEY_PRIVATE);
+
+                                fd_global = fopen(stack_fmt(&stack, "%s/global", io_path), "w+");
+                                setvbuf(fd_global, NULL, _IONBF, 0);
+                                fd = fd_global;
+
+                                state = CONNECTED;
+                                break;
+                            }
+                            default:
+                                log_error("Unexpected connection state during handshake");
+                                return 1;
+                        }
+                    }
                 }
             } else {
                 log_error("Unhandled epoll event!");
@@ -429,6 +588,14 @@ int main(int argc, char **argv) {
             repaint();
             should_repaint = false;
         }
+    }
+
+    crypto_deinit();
+    stack_deinit(&stack);
+
+    fclose(fd_log);
+    if (fd_global) {
+        fclose(fd_global);
     }
 
     // If we're not interactive, wait a while before exiting so

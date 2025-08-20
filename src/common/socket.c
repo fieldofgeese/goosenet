@@ -36,13 +36,17 @@ int socket_send_all(int sock, const unsigned char *data, const size_t size) {
         total_bytes_sent += bytes_sent;
     }
 
+    log_info("sent %lu B to fd %d", total_bytes_sent, sock);
+
     return 0;
 }
 
 // Same here, the `recv(...)` function is not guaranteed to read all the data
 // available in the socket, so call it repeatedaly until it returns that
 // the socket is emtpy.
-ssize_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
+ssize_t socket_recv_all(struct stack *stack, int sock, uint8_t **out) {
+    uint8_t *buf = stack_top(stack);
+    size_t buf_size = stack_free_size(stack);
     size_t total_bytes_received = 0;
     ssize_t bytes_received = 0;
 
@@ -63,7 +67,17 @@ ssize_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size) {
         }
 
         total_bytes_received += bytes_received;
-    } while (bytes_received > 0);
+    } while (bytes_received > 0 && total_bytes_received < buf_size);
+
+    if (bytes_received > 0) {
+        log_error("Failed to receive all bytes");
+        return -1;
+    }
+
+    stack->top += total_bytes_received;
+    *out = buf;
+
+    log_info("received %lu B from fd %d", total_bytes_received, sock);
 
     return total_bytes_received;
 }

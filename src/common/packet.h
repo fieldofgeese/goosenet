@@ -1,6 +1,7 @@
 #pragma once
 
 #include "log.h"
+#include "stack.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -25,23 +26,25 @@ static inline size_t packet_size(struct packet *p) {
     return sizeof(struct header) + payload_size(p);
 }
 
-static inline void packet_encode(struct packet *p, uint8_t *bytes) {
+static inline const uint8_t *packet_encode(struct stack *stack,
+                                           struct packet *p) {
     struct header h = {
         .magic = GOOSE_MAGIC,
-        .size = payload_size(p),
+        .size = (uint16_t) payload_size(p),
     };
 
     // Copy in header
-    memcpy(bytes, &h, sizeof(struct header));
-    bytes += sizeof(struct header);
+    uint8_t *res = stack->memory + stack->top;
+    memcpy(stack_alloc(stack, sizeof(struct header)), &h, sizeof(struct header));
 
     // Copy in name with NULL terminator
     size_t name_size = strlen(p->name) + 1;
-    memcpy(bytes, p->name, name_size);
-    bytes += name_size;
+    memcpy(stack_alloc(stack, name_size), p->name, name_size);
 
     // Copy data
-    memcpy(bytes, p->data, p->data_size);
+    memcpy(stack_alloc(stack, p->data_size), p->data, p->data_size);
+
+    return res;
 }
 
 static inline int packet_decode(const uint8_t *bytes, const size_t size, struct packet *p) {

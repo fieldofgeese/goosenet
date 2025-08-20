@@ -1,7 +1,8 @@
 #pragma once
 
-#include <stdbool.h>
+#include "stack.h"
 
+#include <stdbool.h>
 #include <unistd.h> // So the including code can use `close`
 #include <errno.h>
 #include <sys/socket.h>
@@ -27,7 +28,7 @@ void set_blocking(int fd, bool state);
 int socket_send_all(int sock, const unsigned char *data, const size_t size);
 
 // Receive all data available in the socket.
-ssize_t socket_recv_all(int sock, unsigned char *buf, const size_t buf_size);
+ssize_t socket_recv_all(struct stack *stack, int sock, uint8_t **out);
 
 // Create a new TCP socket and attempts to connect to.
 // the specified host:port.

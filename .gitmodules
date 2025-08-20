@@ -1,0 +1,3 @@
+[submodule "submodules/rnp"]
+	path = submodules/rnp
+	url = https://github.com/rnpgp/rnp
